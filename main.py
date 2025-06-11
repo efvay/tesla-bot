@@ -6,6 +6,8 @@ from flask import Flask
 from telegram import Bot
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -13,7 +15,26 @@ CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 app = Flask(__name__)
 last_status = False
-last_notified_unavailable = datetime.now() - timedelta(hours=6)  # İlk çalışmada bildirim göndermesin diye
+last_notified_unavailable = datetime.now() - timedelta(hours=6)
+
+# 🔁 Retry destekli requests oturumu
+def create_retry_session(retries=3, backoff_factor=5, status_forcelist=(500, 502, 503, 504)):
+    session = requests.Session()
+    retry = Retry(
+        total=retries,
+        read=retries,
+        connect=retries,
+        backoff_factor=backoff_factor,
+        status_forcelist=status_forcelist,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('https://', adapter)
+    session.mount('http://', adapter)
+    return session
+
+# Session başlat
+session = create_retry_session()
 
 @app.route("/")
 def home():
@@ -39,7 +60,8 @@ def check_model_y_stock_loop():
                 "Accept-Encoding": "gzip, deflate, br",
                 "Connection": "keep-alive"
             }
-            response = requests.get(url, headers=headers, timeout=30)
+
+            response = session.get(url, headers=headers, timeout=30)
 
             if "Yeni Model Y" in response.text:
                 if not last_status:
@@ -54,10 +76,13 @@ def check_model_y_stock_loop():
 
             print("Stok kontrol edildi.")
         except Exception as e:
-            print(f"Hata: {e}")
-        
+           print(f"Hata: {e}")
+           try:
+              bot.send_message(chat_id=int(CHAT_ID), text=f"❌ Tesla sitesine bağlanılamadı: {e}")
+           except Exception as telegram_error:
+             print(f"Telegram gönderme hatası: {telegram_error}")
+
         time.sleep(300)
 
 if __name__ == "__main__":
     threading.Thread(target=check_model_y_stock_loop, daemon=True).start()
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
